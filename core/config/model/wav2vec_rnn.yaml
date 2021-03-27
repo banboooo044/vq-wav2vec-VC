@@ -1,0 +1,16 @@
+# @package _group_
+encoder:
+    V: 320
+    G: 2
+vocoder:
+    code_book_num: ${model.encoder.V}
+    code_embedding_dim: 128
+    conditioning_channels: 128
+    n_speakers: ${dataset.n_speakers}
+    speaker_embedding_dim: 64
+    mu_embedding_dim: 256
+    rnn_channels: 896
+    rnn_layers_num: 2
+    fc_channels: 256
+    bits: ${preprocessing.bits}
+    hop_length: ${preprocessing.hop_length}
