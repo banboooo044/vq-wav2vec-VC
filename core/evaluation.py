@@ -2,12 +2,9 @@ import pyworld
 import pysptk
 import numpy as np
 from scipy.ndimage.filters import gaussian_filter
-import librosa
 import math
 import re
-import os
 import scipy.stats as stats
-from scipy.signal import stft
 from scipy.spatial.distance import euclidean
 from fastdtw import fastdtw
 from nnmnkwii.metrics import melcd
@@ -15,8 +12,6 @@ from nnmnkwii.preprocessing import trim_zeros_frames, remove_zeros_frames, delta
 from espnet_model_zoo.downloader import ModelDownloader
 from espnet2.bin.asr_inference import Speech2Text
 import Levenshtein
-import difflib
-import soundfile
 import json
 import warnings
 from pathlib import Path
@@ -24,17 +19,15 @@ import hydra.utils as utils
 import matplotlib.pyplot as plt
 import pickle
 import seaborn as sns
+from utils import normalize
 sns.set()
 
 warnings.simplefilter('ignore')
 
 d = ModelDownloader()
 speech2text_en = Speech2Text(
-            **d.download_and_unpack(task="asr", corpus="librispeech")
-        )
-speech2text_jp = Speech2Text(
-            **d.download_and_unpack(task="asr", corpus="csj")
-        )
+    **d.download_and_unpack(task="asr", corpus="librispeech")
+)
 
 def log_spec_dB_dist(x, y):
     log_spec_dB_const = 10.0 / math.log(10.0) * math.sqrt(2.0)
@@ -197,78 +190,3 @@ def wer_cer(x, true_word_list, true_character_list):
     wer_score, wer_L = wer(true_word_list, word_target)
     cer_score, cer_L = cer(true_character_list, character_target)
     return wer_score, wer_L, cer_score, cer_L, text, " ".join(true_word_list)
-
-def wer_cer_jp(x, true_text):
-    text, token, *_ = speech2text_jp(x)[0]
-    predicted_text = preprocess_text(text)
-    true_text = preprocess_text(true_text)
-    wer_score, wer_L = wer_jp(true_text, predicted_text)
-    cer_score, cer_L = cer_jp(true_text, predicted_text)
-    return wer_score, wer_L, cer_score, cer_L, predicted_text, true_text
-
-def diff_words(correct, predicted):
-    return Levenshtein.distance(correct, predicted)/len(correct), len(correct)
-
-def diff_chars(correct, predicted):
-    s1=list(predicted)
-    s2=list(correct)
-    #s2の中で、s1と比較して異なる語のリスト
-    diff=[]
-    #語数
-    num_chars=len(s2)
-    #削除語
-    num_delete = num_insert = num_replace = 0
-    matcher = difflib.SequenceMatcher(None, s1, s2)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'delete':
-            diff.append('del'+''.join(s1[i1:i2]))
-            num_delete+=i2-i1
-        elif tag == 'equal':
-            pass
-        elif tag == 'insert':
-            diff.append('ins'+''.join(s2[j1:j2]))
-            num_insert+=j2-j1
-        elif tag == 'replace':
-            diff.append('rep'+''.join(s1[i1:i2])+'->'+''.join(s2[j1:j2]))
-            num_replace+=i2-i1
-    return (num_delete+num_insert+num_replace)/num_chars, num_chars
-
-def separateWords(lists):
-    word_list=[]
-    tagger = MeCab.Tagger('-Ochasen')
-    tagger.parse("")
-    node = tagger.parseToNode(lists).next
-    while node.next:
-        word_list.append(node.surface)
-        node = node.next
-    return word_list
-
-def wer_jp(predicted_text, true_text):
-    correct = separateWords(true_text)
-    predicted = separateWords(predicted_text)
-    correct, predicted = encode(correct, predicted)
-    wer_score, wer_L = diff_words(predicted, correct)
-    return wer_score, wer_L
-
-def cer_jp(predicted_text, true_text):
-    cer_score, cer_L = diff_chars(predicted_text, true_text)
-    return cer_score, cer_L
-
-def normalize(wav):
-    return wav / np.abs(wav).max() * 0.999
-
-def rmse(cv, ref, sr=16000):
-    cv = normalize(cv)
-    ref = normalize(ref)
-    _, path = fastdtw(cv, ref, dist=euclidean)
-    path = np.array(path).T
-    _, _, cv_Zxx = stft(cv[path[0]], fs=sr)
-    _, _, ref_Zxx = stft(ref[path[1]], fs=sr)
-    value = np.sqrt(np.mean(np.power(20 * np.log10(np.abs(ref_Zxx) / np.abs(cv_Zxx)), 2), axis=0))[10:-10]
-    return np.mean(value)
-
-
-if __name__ == "__main__":
-    x,_ = librosa.load("datasets/cmu_arctic/cmu_us_slt_arctic/wav/arctic_a0010.wav",sr=16000)
-    y,_ = librosa.load("outputs/gru3/bdl2slt/arctic_a0010.wav",sr=16000)
-    print(rmse(x, y))

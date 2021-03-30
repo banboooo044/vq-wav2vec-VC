@@ -4,36 +4,61 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from fairseq.models.wav2vec import Wav2VecModel
+import numpy as np
 
 from tqdm import tqdm
-import numpy as np
-from preprocess import mulaw_decode
-import math
 from copy import deepcopy
 from pathlib import Path
-
-from fairseq.models.wav2vec import Wav2VecModel
-import apex.amp as amp
 from collections import OrderedDict
 import gc
+import apex.amp as amp
+
+from utils import mulaw_decode
 
 class EarlyStopping(object):
-    def __init__(self, patient, min_delta):
-        self.monitor_value = float('inf')
-        self.patient = patient
-        self.min_delta = min_delta
-        self.cnt = 0
-
-    def is_stop(self, monitor_value):
-        if (self.monitor_value-monitor_value) > self.min_delta:
-            self.cnt = 0
-            self.monitor_value = monitor_value
-            return False
-        elif self.cnt < self.patient:
-            self.cnt += 1
-            return False
+    def __init__(self, monitor='loss', direction='min'):
+        self.monitor = monitor
+        self.direction = direction
+        if direction == 'min':
+            self.__monitor_values = { self.monitor : float('inf') }
+        elif direction == 'max':
+            self.__monitor_values = { self.monitor : -float('inf') }
         else:
-            return True
+            raise ValueError("args: [direction] must be min or max")
+        self.__best_state = None
+
+    def update(self, values):
+        return (self.direction == 'min' and self.__monitor_values[self.monitor] > values[self.monitor]) \
+                    or (self.direction == 'max' and self.__monitor_values[self.monitor] < values[self.monitor])
+
+    @property
+    def monitor_values(self):
+        pass
+
+    @monitor_values.setter
+    def monitor_values(self, monitor_values):
+        if not isinstance(monitor_values, dict):
+            raise ValueError("[monitor_values] must be dict")
+        self.__monitor_values = monitor_values
+
+    @monitor_values.getter
+    def monitor_values(self):
+        return self.__monitor_values
+
+    @property
+    def best_state(self):
+        pass
+
+    @best_state.setter
+    def best_state(self, best_state):
+        if not isinstance(best_state, dict):
+            raise ValueError("[best_state] must be dict")
+        self.__best_state = best_state
+
+    @best_state.getter
+    def best_state(self):
+        return self.__best_state
 
 def get_gru_cell(gru):
     gru_cell = nn.GRUCell(gru.input_size, gru.hidden_size)
@@ -74,9 +99,7 @@ class RnnDecoder(nn.Module):
         self.code_embedding_1 = nn.Embedding(code_book_num, code_embedding_dim)
         self.code_embedding_2 = nn.Embedding(code_book_num, code_embedding_dim)
         self.speaker_embedding = nn.Embedding(n_speakers, speaker_embedding_dim)
-        self.rnn1 = nn.GRU(2*code_embedding_dim + speaker_embedding_dim, conditioning_channels,
-                           num_layers=2, batch_first=True, bidirectional=True)
-        # add
+        self.rnn1 = nn.GRU(2*code_embedding_dim + speaker_embedding_dim, conditioning_channels, num_layers=2, batch_first=True, bidirectional=True)
         self.rnn1A = nn.ModuleList([ nn.GRU(2*code_embedding_dim + 2*conditioning_channels, conditioning_channels, num_layers=2, batch_first=True, bidirectional=True) for _ in range(rnn_layers_num) ])
 
         self.mu_embedding = nn.Embedding(self.quantization_channels, mu_embedding_dim)
@@ -91,17 +114,18 @@ class RnnDecoder(nn.Module):
         speakers = self.speaker_embedding(speakers)
         speakers = speakers.unsqueeze(1).expand(-1, z.size(1), -1)
         z = torch.cat((z, speakers), dim=-1)
-        z, _ = self.rnn1(z)
 
-        ### add
+        # -- Conditioning sub-network
+        z, _ = self.rnn1(z)
+        ## GRU Block
         for i in range(self.rnn_layers_num):
             z = torch.cat((z, z1, z2), dim=2)
             z, _ = self.rnn1A[i](z)
-        #######
 
         z = F.interpolate(z.transpose(1, 2), size=audio_size)
         z = z.transpose(1, 2)
 
+        # -- Autoregressive model
         x = self.mu_embedding(x)
         x, _ = self.rnn2(torch.cat((x, z), dim=2))
         x = F.relu(self.fc1(x))
@@ -120,11 +144,9 @@ class RnnDecoder(nn.Module):
         z = torch.cat((z, speaker), dim=-1)
         z, _ = self.rnn1(z)
 
-        ### add
         for i in range(self.rnn_layers_num):
             z = torch.cat((z, z1, z2), dim=2)
             z, _ = self.rnn1A[i](z)
-        #######
 
         z = F.interpolate(z.transpose(1, 2), size=audio_size)
         z = z.transpose(1, 2)
@@ -133,6 +155,7 @@ class RnnDecoder(nn.Module):
         h = torch.zeros(batch_size, self.rnn_channels, device=z.device)
         x = torch.zeros(batch_size, device=z.device).fill_(self.quantization_channels // 2).long()
         unbind = torch.unbind(z, dim=1)
+
         for m in tqdm(unbind, leave=False):
             x = self.mu_embedding(x)
             h = cell(torch.cat((x, m), dim=1), h)
@@ -140,7 +163,6 @@ class RnnDecoder(nn.Module):
             logits = self.fc2(x)
             dist = Categorical(logits=logits)
             x = dist.sample()
-            # -1 ~ 1に直す.
             output.append(2 * x.float().item() / (self.quantization_channels - 1.) - 1.)
 
         output = np.asarray(output, dtype=np.float64)
@@ -148,16 +170,16 @@ class RnnDecoder(nn.Module):
         return output
 
 class VQW2V_RNNDecoder(nn.Module):
-    def __init__(self, enc_checkpoint_path, **decoder_args):
+    def __init__(self, enc_checkpoint_path, **model_args):
+        super(VQW2V_RNNDecoder, self).__init__()
         self.encoder = VQ_Wav2Vec(enc_checkpoint_path)
-        self.decoder = RnnDecoder(**decoder_args)
+        self.decoder = RnnDecoder(**model_args['decoder'])
         self.optimizer = None
         self.schedular = None
-        self.best_checkpoint = None
         self.step = 0
         self.device = 'cpu'
 
-    def setup(self, optimizer, schedular, device, amp=False):
+    def setup(self, optimizer, schedular, device, use_amp=False):
         self.encoder.to(device)
         self.decoder.to(device)
         self.optimizer = optimizer
@@ -204,11 +226,14 @@ class VQW2V_RNNDecoder(nn.Module):
                 del loss
 
             gc.collect()
-            self.scheduler.step()
-        return
+            self.schedular.step()
 
-    def validation_step(self, va_dl):
-        self.vocoder.eval()
+        tr_score = { 'loss' : sum_loss / N}
+        return tr_score
+
+    def validation_step(self, va_dl, score_f):
+        self.encoder.eval()
+        self.decoder.eval()
         N = 0
         sum_loss = 0
         with torch.no_grad():
@@ -231,28 +256,56 @@ class VQW2V_RNNDecoder(nn.Module):
         va_score = { 'loss' : sum_loss / N }
         return va_score
 
-    def store_checkpoint(self):
-        self.best_checkpoint =  {
+    def convert(self, audio, speaker):
+        if audio.dim() == 2:
+            audio = audio.unsqueeze(0)
+        elif audio.dim() == 3: #OK
+            pass
+        else:
+            raise AssertionError("[audio] n_dim must be 2 or 3")
+
+        self.encoder.eval()
+        self.decoder.eval()
+        with torch.no_grad():
+            audio, speaker = audio.to(self.device), speaker.to(self.device)
+            idxs = self.encoder.encode(audio)
+            idxs1, idxs2 = idxs[:, :, 0], idxs[:, :, 1]
+            output = self.vocoder.generate(idxs1, idxs2, speaker, audio.size(0))
+        return output
+
+
+    def checkpoint(self):
+        best_checkpoint =  {
             "decoder": deepcopy(self.decoder.state_dict()),
             "optimizer": deepcopy(self.optimizer.state_dict()),
-            "scheduler": deepcopy(self.scheduler.state_dict()),
+            "schedular": deepcopy(self.schedular.state_dict()),
             "step": self.step,
         }
+        best_checkpoint['amp'] = deepcopy(amp.state_dict())
+        return best_checkpoint
 
     def save_model(self, checkpoint_dir, state_dict=None):
         checkpoint_dir = Path(checkpoint_dir)
-        checkpoint_path = checkpoint_dir / f"model-{self.step}.pt"
+        if state_dict is None:
+            checkpoint_path = checkpoint_dir / f"model-{self.step}.pt"
+        else:
+            checkpoint_path = checkpoint_dir / f"best_model-{state_dict['step']}.pt"
         checkpoint_dir.mkdir(exist_ok=True, parents=True)
         if state_dict is None:
             state_dict = {
                 "decoder": deepcopy(self.decoder.state_dict()),
                 "optimizer": deepcopy(self.optimizer.state_dict()),
-                "scheduler": deepcopy(self.scheduler.state_dict()),
+                "schedular": deepcopy(self.schedular.state_dict()),
                 "step": self.step,
             }
         torch.save(state_dict, checkpoint_path)
 
-    def save_best_model(self, checkpoint_dir):
-        checkpoint_path = checkpoint_dir / f"best-model.pt"
-        checkpoint_dir.mkdir(exist_ok=True, parents=True)
-        torch.save(self.best_checkpoint, checkpoint_path)
+    def load_model(self, checkpoint):
+        self.decoder.load_state_dict(checkpoint["decoder"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        self.schedular.load_state_dict(checkpoint["schedular"])
+        self.step = checkpoint["step"]
+        amp.load_state_dict(checkpoint["amp"])
+
+    def load_decoder(self, checkpoint):
+        self.decoder.load_state_dict(checkpoint["decoder"])

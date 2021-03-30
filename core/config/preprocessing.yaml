@@ -1,5 +1,0 @@
-defaults:
-    - dataset: cmu_arctic/default
-    - preprocessing: default
-
-in_dir: datasets/cmu_arctic

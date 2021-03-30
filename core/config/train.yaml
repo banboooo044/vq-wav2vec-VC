@@ -1,19 +1,15 @@
 defaults:
-    - dataset: cmu_arctic/default
+    - dataset: cmu_arctic
     - preprocessing: default
     - model: wav2vec_rnn
     - training: wav2vec_rnn
 
-resume: False
-vocoder_checkpoint: False
-enc_checkpoint: checkpoints/enc/vq-wav2vec.pt
-checkpoint_dir: ???
 seed: 100
+enc_checkpoint: ???
+resume: False
+pretrain_checkpoint: False
 train_list: train.json
 val_list: val.json
 test_list: test.json
-train_vocoder_all: True
-train_params:
-    - speaker_embedding.weight
-    - code_embedding1.weight
-    - code_embedding2.weight
+checkpoint_dir: ???
+tensorboard_dir: ???

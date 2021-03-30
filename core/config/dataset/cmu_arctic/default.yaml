@@ -1,6 +1,0 @@
-# @package _global_
-dataset:
-    dataset: cmu_arctic
-    language: english
-    path: cmu_arctic
-    n_speakers: 18

@@ -1,0 +1,7 @@
+# @package _group_
+
+dataset: cmu_arctic
+language: english
+path: cmu_arctic
+n_speakers: 18
+speaker_list_path: speakers.json

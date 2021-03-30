@@ -2,7 +2,7 @@
 encoder:
     V: 320
     G: 2
-vocoder:
+decoder:
     code_book_num: ${model.encoder.V}
     code_embedding_dim: 128
     conditioning_channels: 128
